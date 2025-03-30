@@ -48,17 +48,16 @@ class GeoDataPreparing(QWidget):
 
         self.left_container = QWidget()
         self.left_container.setLayout(self.left_layout)
-        self.left_container.setFixedWidth(400)  # Фиксируем ширину левой части
+        self.left_container.setFixedWidth(400)
 
-        # Правая часть (для графиков и статистики)
+        # Правая часть
         self.right_layout = QVBoxLayout()
-        self.stats_text = QTextEdit()  # Поле для отображения статистики
+        self.stats_text = QTextEdit()
         self.right_layout.addWidget(self.stats_text)
 
         self.right_container = QWidget()
         self.right_container.setLayout(self.right_layout)
 
-        # Общий макет
         self.main_layout = QHBoxLayout()
         self.main_layout.addWidget(self.left_container)
         self.main_layout.addWidget(self.right_container)
@@ -73,6 +72,7 @@ class GeoDataPreparing(QWidget):
         layout.addWidget(QLabel(f'Путь к файлу {source_name}:'))
         file_path_layout = QHBoxLayout()
         self.file_path_edit = QLineEdit()
+        self.file_path_edit.setStyleSheet("text-align: left;")
         self.file_path_button = QPushButton('Выбрать')
         self.file_path_button.clicked.connect(lambda: self.select_file(self.file_path_edit))
         file_path_layout.addWidget(self.file_path_edit)
@@ -83,6 +83,7 @@ class GeoDataPreparing(QWidget):
         layout.addWidget(QLabel('Путь к файлу для сопоставления названий полей:'))
         fields_mapping_path_layout = QHBoxLayout()
         self.fields_mapping_path_edit = QLineEdit()
+        self.fields_mapping_path_edit.setStyleSheet("text-align: left;")
         self.fields_mapping_path_button = QPushButton('Выбрать')
         self.fields_mapping_path_button.clicked.connect(self.select_fields_mapping_file)
         fields_mapping_path_layout.addWidget(self.fields_mapping_path_edit)
@@ -93,7 +94,6 @@ class GeoDataPreparing(QWidget):
         self.cultures_checkboxes_grid = QGridLayout()
         layout.addLayout(self.cultures_checkboxes_grid)
 
-        # Кнопка Показать статистику
         self.show_stats_button = QPushButton('Показать статистику')
         self.show_stats_button.clicked.connect(self.show_statistics)
         layout.addWidget(self.show_stats_button)
@@ -109,9 +109,16 @@ class GeoDataPreparing(QWidget):
     def select_fields_mapping_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, 'Выбрать файл сопоставления полей', '', 'Excel Files (*.xlsx)')
         if file_path:
-            self.fields_mapping_path_edit.setText(file_path)
+            # Получаем активную вкладку
             current_tab_index = self.left_tabs.currentIndex()
             current_tab = self.left_tabs.widget(current_tab_index)
+            # Находим поле пути в активной вкладке
+            for i in range(current_tab.layout().count()):
+                item = current_tab.layout().itemAt(i)
+                if item.widget() and isinstance(item.widget(), QLineEdit):
+                    self.fields_mapping_path_edit = item.widget()
+                    break
+            self.fields_mapping_path_edit.setText(file_path)
             self.load_cultures_from_excel(file_path, current_tab)
 
     def load_cultures_from_excel(self, file_path, tab):
@@ -133,7 +140,15 @@ class GeoDataPreparing(QWidget):
             if item.widget() and isinstance(item.widget(), QCheckBox):
                 item.widget().setParent(None)
 
+        for i in reversed(range(tab.layout().count())):
+            item = tab.layout().itemAt(i)
+            if item.layout() and isinstance(item.layout(), QGridLayout):
+                for j in reversed(range(item.layout().count())):
+                    item.layout().itemAt(j).widget().setParent(None)
+                item.layout().setParent(None)
+
         self.culture_checkboxes = {}
+        self.cultures_checkboxes_grid = QGridLayout()
         row = 0
         col = 0
         for culture in cultures:
@@ -156,10 +171,10 @@ class GeoDataPreparing(QWidget):
         for culture in selected_cultures:
             stats_text += f"- {culture}: {len(self.cultures_data.get(culture, []))} полей\n"
 
-        # статистика в правой части интерфейса
+        # Отображаем статистику в правой части интерфейса
         self.stats_text.setText(stats_text)
 
-        # таблица "Поля"
+        # Заполняем таблицу "Поля"
         self.fill_fields_table(selected_cultures)
 
     def fill_fields_table(self, selected_cultures):
@@ -172,6 +187,7 @@ class GeoDataPreparing(QWidget):
                 self.fields_tab.setItem(row_position, 1, QTableWidgetItem(culture))
 
     def start_processing(self):
+        # Здесь будет код для запуска обработки данных
         print('Начинаем обработку данных...')
 
 if __name__ == '__main__':
