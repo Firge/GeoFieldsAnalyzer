@@ -725,6 +725,7 @@ try:
             exp_val = np.exp(np.clip(arg, -500, 0))
             return (amp / (np.sqrt(2 * np.pi) * wid)) * exp_val
 
+
     class ProcessingWindow(QDialog):
         def __init__(self, parent):
             super().__init__(parent)
@@ -743,13 +744,14 @@ try:
 
             # Выбранные культуры
             self.cultures_list = QListWidget()
-            selected_cultures = [culture for culture, checkbox in self.parent.culture_checkboxes[self.parent.selected_source].items()
+            selected_cultures = [culture for culture, checkbox in
+                                 self.parent.culture_checkboxes[self.parent.selected_source].items()
                                  if checkbox.isChecked()]
             for culture in selected_cultures:
                 self.cultures_list.addItem(culture)
             self.cultures_list.setEnabled(False)
-            self.cultures_list.setFixedHeight(100)  # Увеличиваем высоту списка
-            self.cultures_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)  # Добавляем скролл
+            self.cultures_list.setFixedHeight(100)
+            self.cultures_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
             layout.addWidget(QLabel("Выбранные культуры:"))
             layout.addWidget(self.cultures_list)
 
@@ -783,7 +785,8 @@ try:
 
         def fill_fields_table(self):
             self.fields_table.setRowCount(0)
-            selected_cultures = [culture for culture, checkbox in self.parent.culture_checkboxes[self.parent.selected_source].items()
+            selected_cultures = [culture for culture, checkbox in
+                                 self.parent.culture_checkboxes[self.parent.selected_source].items()
                                  if checkbox.isChecked()]
             for culture in selected_cultures:
                 for field in self.parent.cultures_data[self.parent.selected_source].get(culture, []):
@@ -796,18 +799,49 @@ try:
             self.stats_text.append("Генерация фич началась...")
             self.progress_bar.setValue(10)
 
-            df = self.parent.combined_df
+            df = self.parent.combined_df.copy()
+            if df.empty:
+                self.stats_text.append("Ошибка: данные из обработки отсутствуют")
+                self.progress_bar.setValue(0)
+                return
+
+            # Удаляем столбцы x, y, field
+            columns_to_drop = ['x', 'y', 'field']
+            df = df.drop(columns=[col for col in columns_to_drop if col in df.columns], errors='ignore')
+
+            # Проверяем наличие данных
+            if df.empty or len(df.columns) <= 1:  # Только culture остаётся
+                self.stats_text.append("Ошибка: после удаления x, y, field данных не осталось")
+                self.progress_bar.setValue(0)
+                return
+
+            # Преобразуем в длинный формат для tsfresh
             df_melted = df.melt(id_vars=['culture'], var_name='date', value_name='value')
-            df_melted['time'] = df_melted['date'].apply(lambda x: datetime.datetime.strptime(x, '%Y-%m-%d').timetuple().tm_yday)
-            df_melted['id'] = df_melted.index
+            df_melted['time'] = df_melted['date'].apply(
+                lambda x: datetime.datetime.strptime(x, '%Y-%m-%d').timetuple().tm_yday)
+            df_melted['id'] = df_melted.index  # Уникальный идентификатор для каждой строки
 
-            features = extract_features(df_melted, column_id='id', column_sort='time', column_value='value')
-            features_path = os.path.join(self.parent.save_folder, 'features.csv')
-            features.to_csv(features_path)
+            self.stats_text.append(f"Преобразованные данные: {len(df_melted)} строк")
 
-            self.progress_bar.setValue(100)
-            self.stats_text.append(f"Фичи сгенерированы и сохранены в {features_path}")
-            self.features = features
+            # Генерация признаков с помощью tsfresh
+            try:
+                features = extract_features(df_melted, column_id='id', column_sort='time', column_value='value')
+                self.progress_bar.setValue(50)
+
+                # Сохранение признаков
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                features_path = os.path.join(self.parent.save_folder, f'features_{timestamp}.csv')
+                features.to_csv(features_path, index=True, sep=';', encoding='utf-8')
+
+                self.features = features
+                self.stats_text.append(f"Фичи сгенерированы и сохранены в {features_path}")
+                self.stats_text.append(f"Количество сгенерированных признаков: {len(features.columns)}")
+                self.progress_bar.setValue(100)
+
+            except Exception as e:
+                self.stats_text.append(f"Ошибка при генерации фич: {str(e)}")
+                self.progress_bar.setValue(0)
+                return
 
         def select_features(self):
             self.stats_text.append("Отбор параметров начался...")
@@ -818,12 +852,33 @@ try:
                 self.progress_bar.setValue(0)
                 return
 
+            # Используем culture как целевую переменную
             y = self.parent.combined_df['culture']
-            selected_features = select_features(self.features, y)
+            if len(y) != len(self.features):
+                self.stats_text.append("Ошибка: несоответствие размеров данных и признаков")
+                self.progress_bar.setValue(0)
+                return
 
-            selected_params = list(selected_features.columns)
-            self.stats_text.append("Отобранные параметры:\n" + "\n".join(selected_params))
-            self.progress_bar.setValue(100)
+            # Отбор значимых признаков
+            try:
+                selected_features = select_features(self.features, y)
+                self.progress_bar.setValue(50)
+
+                # Сохранение отобранных признаков
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                selected_features_path = os.path.join(self.parent.save_folder, f'selected_features_{timestamp}.csv')
+                selected_features.to_csv(selected_features_path, index=True, sep=';', encoding='utf-8')
+
+                selected_params = list(selected_features.columns)
+                self.stats_text.append("Отобранные параметры:\n" + "\n".join(selected_params))
+                self.stats_text.append(f"Отобрано признаков: {len(selected_params)}")
+                self.stats_text.append(f"Сохранено в {selected_features_path}")
+                self.progress_bar.setValue(100)
+
+            except Exception as e:
+                self.stats_text.append(f"Ошибка при отборе параметров: {str(e)}")
+                self.progress_bar.setValue(0)
+                return
 
     if __name__ == '__main__':
         app = QApplication(sys.argv)
