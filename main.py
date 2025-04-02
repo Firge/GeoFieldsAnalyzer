@@ -735,14 +735,12 @@ try:
 
             layout = QVBoxLayout()
 
-            # Статистика
             self.stats_text = QTextEdit()
             self.stats_text.setReadOnly(True)
             self.stats_text.setText(self.parent.stats_text.toPlainText())
             layout.addWidget(QLabel("Статистика:"))
             layout.addWidget(self.stats_text)
 
-            # Выбранные культуры
             self.cultures_list = QListWidget()
             selected_cultures = [culture for culture, checkbox in
                                  self.parent.culture_checkboxes[self.parent.selected_source].items()
@@ -755,7 +753,6 @@ try:
             layout.addWidget(QLabel("Выбранные культуры:"))
             layout.addWidget(self.cultures_list)
 
-            # Таблица полей
             self.fields_table = QTableWidget()
             self.fields_table.setColumnCount(2)
             self.fields_table.setHorizontalHeaderLabels(['Поле', 'Культура'])
@@ -763,11 +760,9 @@ try:
             layout.addWidget(QLabel("Поля:"))
             layout.addWidget(self.fields_table)
 
-            # Выбранный канал
             self.channel_label = QLabel(f"Выбранный канал: {self.parent.selected_channel}")
             layout.addWidget(self.channel_label)
 
-            # Кнопки
             self.generate_features_button = QPushButton("Генерировать фичи")
             self.generate_features_button.clicked.connect(self.generate_features)
             layout.addWidget(self.generate_features_button)
@@ -776,7 +771,6 @@ try:
             self.select_features_button.clicked.connect(self.select_features)
             layout.addWidget(self.select_features_button)
 
-            # Прогресс-бар
             self.progress_bar = QProgressBar()
             self.progress_bar.setValue(0)
             layout.addWidget(self.progress_bar)
@@ -799,33 +793,40 @@ try:
             self.stats_text.append("Генерация фич началась...")
             self.progress_bar.setValue(10)
 
+            # Используем данные из этапа обработки
             df = self.parent.combined_df.copy()
             if df.empty:
                 self.stats_text.append("Ошибка: данные из обработки отсутствуют")
                 self.progress_bar.setValue(0)
                 return
 
-            # Удаляем столбцы x, y, field
+            # Удаляем ненужные столбцы
             columns_to_drop = ['x', 'y', 'field']
             df = df.drop(columns=[col for col in columns_to_drop if col in df.columns], errors='ignore')
 
-            # Проверяем наличие данных
             if df.empty or len(df.columns) <= 1:  # Только culture остаётся
                 self.stats_text.append("Ошибка: после удаления x, y, field данных не осталось")
                 self.progress_bar.setValue(0)
                 return
 
+            # Сохраняем исходные индексы для синхронизации
+            df['original_id'] = df.index
+
             # Преобразуем в длинный формат для tsfresh
-            df_melted = df.melt(id_vars=['culture'], var_name='date', value_name='value')
+            df_melted = df.melt(id_vars=['culture', 'original_id'], var_name='date', value_name='value')
             df_melted['time'] = df_melted['date'].apply(
                 lambda x: datetime.datetime.strptime(x, '%Y-%m-%d').timetuple().tm_yday)
-            df_melted['id'] = df_melted.index  # Уникальный идентификатор для каждой строки
 
-            self.stats_text.append(f"Преобразованные данные: {len(df_melted)} строк")
+            self.stats_text.append(f"Длинный формат: {len(df_melted)} строк")
 
-            # Генерация признаков с помощью tsfresh
+            # Генерация признаков
             try:
-                features = extract_features(df_melted, column_id='id', column_sort='time', column_value='value')
+                from tsfresh.feature_extraction import MinimalFCParameters
+                features = extract_features(df_melted,
+                                            column_id='original_id',
+                                            column_sort='time',
+                                            column_value='value',
+                                            default_fc_parameters=MinimalFCParameters())
                 self.progress_bar.setValue(50)
 
                 # Сохранение признаков
@@ -840,6 +841,8 @@ try:
 
             except Exception as e:
                 self.stats_text.append(f"Ошибка при генерации фич: {str(e)}")
+                import traceback
+                self.stats_text.append(f"Трассировка: {traceback.format_exc()}")
                 self.progress_bar.setValue(0)
                 return
 
@@ -854,14 +857,36 @@ try:
 
             # Используем culture как целевую переменную
             y = self.parent.combined_df['culture']
-            if len(y) != len(self.features):
-                self.stats_text.append("Ошибка: несоответствие размеров данных и признаков")
+            features = self.features
+
+            # Проверяем и синхронизируем данные
+            self.stats_text.append(f"Размер признаков: {features.shape[0]}, размер y: {len(y)}")
+            if len(y) != features.shape[0]:
+                self.stats_text.append("Несоответствие размеров, синхронизация...")
+                # Синхронизация по индексам
+                common_indices = features.index.intersection(y.index)
+                if len(common_indices) == 0:
+                    self.stats_text.append("Ошибка: нет общих индексов между признаками и y")
+                    self.progress_bar.setValue(0)
+                    return
+                features = features.loc[common_indices]
+                y = y.loc[common_indices]
+                self.stats_text.append(f"После синхронизации: размер y: {len(y)}, размер features: {features.shape[0]}")
+
+            # Очистка данных от NaN и бесконечностей
+            features = features.replace([np.inf, -np.inf], np.nan).dropna()
+            if features.empty:
+                self.stats_text.append("Ошибка: после очистки признаков данные пусты")
                 self.progress_bar.setValue(0)
                 return
 
+            # Синхронизация после очистки
+            y = y.loc[features.index]
+            self.stats_text.append(f"После очистки: размер y: {len(y)}, размер features: {features.shape[0]}")
+
             # Отбор значимых признаков
             try:
-                selected_features = select_features(self.features, y)
+                selected_features = select_features(features, y)
                 self.progress_bar.setValue(50)
 
                 # Сохранение отобранных признаков
@@ -877,6 +902,8 @@ try:
 
             except Exception as e:
                 self.stats_text.append(f"Ошибка при отборе параметров: {str(e)}")
+                import traceback
+                self.stats_text.append(f"Трассировка: {traceback.format_exc()}")
                 self.progress_bar.setValue(0)
                 return
 
