@@ -507,35 +507,50 @@ try:
             group_box.setLayout(layout)
             return group_box
 
+        import os
+        import datetime
+        import numpy as np
+        import pandas as pd
+        from scipy.interpolate import CubicSpline
+        from PyQt5.QtWidgets import QFileDialog, QMessageBox
+        from lmfit import Model
+
         def start_processing(self):
             try:
+                # Получаем пути и текущую вкладку
                 selected_source = self.left_tabs.tabText(self.left_tabs.currentIndex())
                 folder_path = self.folder_paths[selected_source].text()
                 save_folder = QFileDialog.getExistingDirectory(self, "Выберите папку для сохранения")
 
-                # Проверка прав на запись
                 if not os.access(save_folder, os.W_OK):
                     raise ValueError(f"Нет прав на запись в папку {save_folder}")
 
                 scl_path = os.path.join(folder_path, "SCL")
+                channel_path = os.path.join(folder_path, self.selected_channel)
 
                 # Проверка входных данных
                 if not folder_path or not save_folder:
                     raise ValueError("Необходимо выбрать все папки")
                 if not os.path.exists(scl_path) or not os.path.isdir(scl_path):
-                    raise ValueError(f"Папка SCL не найдена по пути: {scl_path}")
+                    raise ValueError(f"Папка SCL не найдена: {scl_path}")
+                if not os.path.exists(channel_path) or not os.path.isdir(channel_path):
+                    raise ValueError(f"Канал {self.selected_channel} не найден")
 
                 selected_cultures = [culture for culture, checkbox in self.culture_checkboxes[selected_source].items()
                                      if checkbox.isChecked()]
                 if not selected_cultures:
                     raise ValueError("Не выбраны культуры для обработки")
 
-                channel_path = os.path.join(folder_path, self.selected_channel)
-                if not os.path.exists(channel_path) or not os.path.isdir(channel_path):
-                    raise ValueError(f"Канал {self.selected_channel} не найден")
+                # Получаем выбранный метод аппроксимации из интерфейса
+                selected_method = self.approximation_group.checkedButton()
+                if selected_method:
+                    approx_method = selected_method.text()
+                else:
+                    approx_method = "Аппроксимирующая сплайн функция"
+                    self.stats_text.append("Метод аппроксимации не выбран, используется сплайн")
 
-                # Инициализация DataFrame для объединённых данных
-                combined_df = pd.DataFrame()
+                # Список для хранения данных по пикселям
+                pixel_data_list = []
                 total_fields = sum(len(self.cultures_data[selected_source][culture]) for culture in selected_cultures)
                 processed_fields = 0
 
@@ -546,7 +561,7 @@ try:
                         scl_file = os.path.join(scl_path, f"{field}.csv")
 
                         if os.path.exists(field_file) and os.path.exists(scl_file):
-                            # Чтение файлов
+                            # Чтение данных
                             try:
                                 df = pd.read_csv(field_file, sep=";", encoding="windows-1251")
                                 df_scl = pd.read_csv(scl_file, sep=";", encoding="windows-1251")
@@ -554,13 +569,11 @@ try:
                                 df = pd.read_csv(field_file, sep=";", encoding="utf-8")
                                 df_scl = pd.read_csv(scl_file, sep=";", encoding="utf-8")
 
-                            # Удаление ненужных столбцов
+                            # Сохраняем координаты и исходные столбцы данных
+                            pixel_coords = df[['x', 'y']].copy()
+                            original_columns = [col for col in df.columns if col not in ['x', 'y']]
                             df = df.drop(columns=['x', 'y'], errors='ignore')
                             df_scl = df_scl.drop(columns=['x', 'y'], errors='ignore')
-
-                            # Удаление строк с большим количеством пропусков
-                            df = df.dropna(axis=0, thresh=len(df.columns) * 0.5)
-                            df_scl = df_scl.dropna(axis=0, thresh=len(df_scl.columns) * 0.5)
 
                             # Приведение данных к числовому формату
                             for col in df.columns:
@@ -568,86 +581,109 @@ try:
                                 if col in df_scl.columns:
                                     df_scl[col] = pd.to_numeric(df_scl[col], errors='coerce')
 
-                            # Фильтрация по условиям SCL
+                            # Фильтрация по SCL (облачность), заменяем неподходящие значения на NaN
                             df = df.where((df_scl <= 5) & (df_scl >= 4))
-                            df = df.drop(
-                                columns=[col for col in df.columns if df[col].isna().sum() > len(df[col]) * 0.9])
 
-                            # Пропуск пустых данных
-                            if df.empty or df.dropna(how='all').empty:
-                                continue
+                            # Преобразование дат в дни года для аппроксимации
+                            dates = df.columns
+                            days = [datetime.datetime.strptime(date, '%Y-%m-%d').timetuple().tm_yday for date in dates]
 
-                            # Обработка выбросов
-                            df = df.clip(lower=-1e6, upper=1e6)
+                            # Горизонтальная интерполяция для каждого пикселя
+                            for idx, row in df.iterrows():
+                                pixel_values = row.values
+                                # Заменяем нули на NaN для интерполяции
+                                pixel_values = np.where(pixel_values == 0, np.nan, pixel_values)
+                                mask = np.isfinite(pixel_values)
 
-                            # Важное изменение: сначала добавляем колонку с культурой,
-                            # потом заполняем пропуски средними
-                            df['culture'] = culture
+                                # Проверяем количество валидных точек
+                                if np.sum(mask) < 2:
+                                    continue  # Пропускаем пиксель, если меньше 2 валидных точек
 
-                            # Заполнение пропущенных значений для числовых колонок
-                            numeric_cols = df.select_dtypes(include=['number']).columns
-                            for col in numeric_cols:
-                                if col != 'culture':
-                                    df[col] = df[col].fillna(df[col].mean())
+                                x_data = np.array(days)[mask]
+                                y_data = pixel_values[mask]
 
-                            # Добавление данных в общий DataFrame
-                            combined_df = pd.concat([combined_df, df], axis=0, ignore_index=True)
+                                # Применение выбранного метода аппроксимации
+                                try:
+                                    if approx_method == "Аппроксимирующая сплайн функция":
+                                        interp_func = CubicSpline(x_data, y_data, extrapolate=True)
+                                    elif approx_method == "Аппроксимирующая полиномиальной функцией 2 степени":
+                                        if len(x_data) < 3:
+                                            raise ValueError("Для полинома 2-й степени нужно минимум 3 точки")
+                                        coeffs = np.polyfit(x_data, y_data, 2)
+                                        interp_func = np.poly1d(coeffs)
+                                    elif approx_method == "Аппроксимирующая функция Гаусса":
+                                        gmodel = Model(self.gauss)
+                                        result = gmodel.fit(y_data, x=x_data, amp=5, cen=x_data[np.argmax(y_data)],
+                                                            wid=len(x_data))
+                                        interp_func = lambda x: self.gauss(x, *result.params.values())
+                                    else:
+                                        raise ValueError(f"Неизвестный метод аппроксимации: {approx_method}")
+
+                                    # Вычисление аппроксимированных значений для всех дат
+                                    interpolated_values = interp_func(np.array(days))
+
+                                    # Обработка NaN и нулей в начале и конце
+                                    for i in range(len(interpolated_values)):
+                                        if not np.isfinite(interpolated_values[i]) or interpolated_values[i] == 0:
+                                            if i == 0:
+                                                # Для начала ряда берем первое валидное значение
+                                                for j in range(i + 1, len(interpolated_values)):
+                                                    if np.isfinite(interpolated_values[j]) and interpolated_values[
+                                                        j] != 0:
+                                                        interpolated_values[i] = interpolated_values[j]
+                                                        break
+                                            elif i == len(interpolated_values) - 1:
+                                                # Для конца ряда берем последнее валидное значение
+                                                for j in range(i - 1, -1, -1):
+                                                    if np.isfinite(interpolated_values[j]) and interpolated_values[
+                                                        j] != 0:
+                                                        interpolated_values[i] = interpolated_values[j]
+                                                        break
+
+                                except Exception as e:
+                                    self.stats_text.append(
+                                        f"Ошибка аппроксимации для пикселя {idx} поля {field}: {str(e)}")
+                                    continue
+
+                                # Формируем данные для пикселя
+                                pixel_data = {
+                                    'field': field,
+                                    'x': pixel_coords.iloc[idx]['x'],
+                                    'y': pixel_coords.iloc[idx]['y'],
+                                }
+                                for date_idx, date in enumerate(original_columns):
+                                    pixel_data[date] = interpolated_values[date_idx] if date_idx < len(
+                                        interpolated_values) else np.nan
+                                pixel_data['culture'] = culture
+                                pixel_data_list.append(pixel_data)
 
                             processed_fields += 1
-                            progress = int((processed_fields / total_fields) * 100)
-                            self.progress_bar.setValue(progress)
+                            self.progress_bar.setValue(int((processed_fields / total_fields) * 100))
 
-                # Проверка на пустоту
-                if combined_df.empty:
+                if not pixel_data_list:
                     raise ValueError("Нет данных для выбранных культур после фильтрации")
 
-                # Финальная очистка данных - заменяем inf на NaN, но не удаляем строки
-                combined_df = combined_df.replace([np.inf, -np.inf], np.nan)
+                # Создаем DataFrame с правильным порядком столбцов
+                pixel_df = pd.DataFrame(pixel_data_list)
+                column_order = ['field', 'x', 'y'] + original_columns + ['culture']
+                pixel_df = pixel_df[column_order]
 
-                # Ограничение экстремальных значений
-                combined_df = combined_df.clip(lower=-1e6, upper=1e6)
-
-                # Заполнение оставшихся NaN значений для всего датафрейма
-                for col in combined_df.columns:
-                    if col != 'culture' and combined_df[col].dtype.kind in 'bifc':
-                        combined_df[col] = combined_df[col].fillna(combined_df[col].mean())
-
-                # Создаем уникальное имя файла с временной меткой
+                # Сохранение с заданным именем файла
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 processed_data_path = os.path.join(save_folder, f'processed_data_{timestamp}.csv')
+                pixel_df.to_csv(processed_data_path, index=False, sep=';', encoding='utf-8')
 
-                # Сохранение данных до усреднения с подробной обработкой ошибок
-                try:
-                    combined_df.to_csv(processed_data_path, index=False, sep=';', encoding='utf-8')
+                if os.path.exists(processed_data_path):
+                    file_size = os.path.getsize(processed_data_path)
+                    self.stats_text.append(f"Данные сохранены в {processed_data_path} (размер: {file_size} байт)")
+                else:
+                    self.stats_text.append(f"Ошибка: файл {processed_data_path} не был создан")
 
-                    # Проверка успешности сохранения
-                    if os.path.exists(processed_data_path):
-                        file_size = os.path.getsize(processed_data_path)
-                        self.stats_text.append(
-                            f"Обработанные данные сохранены в {processed_data_path} (размер: {file_size} байт)")
-                    else:
-                        self.stats_text.append(f"Предупреждение: файл {processed_data_path} не был создан")
-                except Exception as save_error:
-                    self.stats_text.append(f"Ошибка при сохранении данных: {str(save_error)}")
-                    # Пробуем альтернативный вариант сохранения
-                    try:
-                        alternative_path = os.path.join(save_folder, f'processed_data_alt_{timestamp}.csv')
-                        combined_df.to_csv(alternative_path, index=False, sep=',', encoding='utf-8')
-                        self.stats_text.append(f"Данные сохранены альтернативным способом в {alternative_path}")
-                    except Exception as alt_save_error:
-                        self.stats_text.append(
-                            f"Не удалось сохранить данные альтернативным способом: {str(alt_save_error)}")
-
-                # Усреднение для дальнейшего использования
-                grouped_df = combined_df.groupby('culture').mean()
-
-                # Сохранение атрибутов для доступа из других методов
-                self.processed_data = grouped_df
-                self.combined_df = combined_df
+                # Передача данных в следующее окно
+                self.combined_df = pixel_df
                 self.save_folder = save_folder
                 self.selected_source = selected_source
 
-                # Переход к следующему окну
                 self.hide()
                 self.processing_window = ProcessingWindow(self)
                 self.processing_window.show()
@@ -658,8 +694,7 @@ try:
                 self.progress_bar.setValue(0)
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Произошла ошибка: {str(e)}")
-                import traceback
-                self.stats_text.append(f"Подробная ошибка: {traceback.format_exc()}")
+                self.stats_text.append(f"Подробности: {str(e)}")
                 self.progress_bar.setValue(0)
 
         def gaussian_double(self, x, a1, b1, c1, a2, b2, c2):
