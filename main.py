@@ -12,6 +12,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib import rc
 import datetime
 from lmfit import Model
 from scipy.interpolate import interp1d, CubicSpline
@@ -448,6 +449,7 @@ class GeoDataPreparing(QWidget):
             dpi = 100
             canvas_width = self.canvas.width() / dpi
             canvas_height = self.canvas.height() / dpi
+            rc('xtick', labelsize=8)
             fig = Figure(figsize=(canvas_width, canvas_height), dpi=dpi)
             ax = fig.add_subplot(111)
 
